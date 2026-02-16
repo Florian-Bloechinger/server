@@ -19,27 +19,27 @@
 import { route } from "@spacebar/api";
 import { ConnectionConfig } from "@spacebar/util";
 import { Request, Response, Router } from "express";
-const router = Router();
+const router = Router({ mergeParams: true });
 
 router.get(
-	"/",
-	route({
-		responses: {
-			200: {
-				body: "APIConnectionsConfiguration",
-			},
-		},
-	}),
-	async (req: Request, res: Response) => {
-		const config = ConnectionConfig.get();
+    "/",
+    route({
+        responses: {
+            200: {
+                body: "APIConnectionsConfiguration",
+            },
+        },
+    }),
+    (req: Request, res: Response) => {
+        const config = ConnectionConfig.get();
 
-		Object.keys(config).forEach((key) => {
-			delete config[key].clientId;
-			delete config[key].clientSecret;
-		});
+        Object.keys(config).forEach((key) => {
+            delete config[key].clientId;
+            delete config[key].clientSecret;
+        });
 
-		res.json(config);
-	},
+        res.json(config);
+    },
 );
 
 export default router;

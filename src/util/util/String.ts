@@ -19,6 +19,28 @@
 import { SPECIAL_CHAR } from "./Regex";
 
 export function trimSpecial(str?: string): string {
-	if (!str) return "";
-	return str.replace(SPECIAL_CHAR, "").trim();
+    if (!str) return "";
+    return str.replace(SPECIAL_CHAR, "").trim();
+}
+
+/**
+ * Capitalizes the first letter of a string.
+ * @param str The string to capitalize.
+ * @returns The capitalized string.
+ */
+export function capitalize(str: string): string {
+    if (!str) return "";
+    return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+export function centerString(str: string, len: number): string {
+    const pad = len - str.length;
+    const padLeft = Math.floor(pad / 2) + str.length;
+    return str.padStart(padLeft).padEnd(len);
+}
+
+export function stringGlobToRegexp(str: string, flags?: string): RegExp {
+    // Convert simple wildcard patterns to regex
+    const escaped = str.replace(".", "\\.").replace("?", ".").replace("*", ".*");
+    return new RegExp(escaped, flags);
 }

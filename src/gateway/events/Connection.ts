@@ -28,106 +28,130 @@ import { Message } from "./Message";
 import { Deflate, Inflate } from "fast-zlib";
 import { URL } from "url";
 import { Config, ErlpackType } from "@spacebar/util";
+import zlib from "node:zlib";
+import { Decoder, Encoder } from "@toondepauw/node-zstd";
 
 let erlpack: ErlpackType | null = null;
 try {
-	erlpack = require("erlpack") as ErlpackType;
+    erlpack = require("@yukikaze-bot/erlpack") as ErlpackType;
 } catch (e) {
-	console.log("Failed to import erlpack: ", e);
-	try {
-		erlpack = require("@yukikaze-bot/erlpack") as ErlpackType;
-	} catch (e) {
-		console.log("Failed to import @yukikaze-bot/erlpack: ", e);
-	}
+    console.log("Failed to import @yukikaze-bot/erlpack: ", e);
 }
 
 // TODO: check rate limit
 // TODO: specify rate limit in config
 // TODO: check msg max size
 
-export async function Connection(
-	this: WS.Server,
-	socket: WebSocket,
-	request: IncomingMessage,
-) {
-	const forwardedFor = Config.get().security.forwardedFor;
-	const ipAddress = forwardedFor
-		? (request.headers[forwardedFor] as string)
-		: request.socket.remoteAddress;
+export const openConnections: WebSocket[] = [];
 
-	socket.ipAddress = ipAddress;
+export async function Connection(this: WS.Server, socket: WebSocket, request: IncomingMessage) {
+    openConnections.push(socket);
+    socket.on("close", () => {
+        const index = openConnections.indexOf(socket);
+        if (index !== -1) openConnections.splice(index, 1);
+    });
 
-	//Create session ID when the connection is opened. This allows gateway dump to group the initial websocket messages with the rest of the conversation.
-	const session_id = genSessionId();
-	socket.session_id = session_id; //Set the session of the WebSocket object
+    const forwardedFor = Config.get().security.forwardedFor;
+    const ipAddress = forwardedFor ? (request.headers[forwardedFor.toLowerCase()] as string) : request.socket.remoteAddress;
 
-	try {
-		// @ts-ignore
-		socket.on("close", Close);
-		// @ts-ignore
-		socket.on("message", Message);
+    socket.ipAddress = ipAddress;
+    socket.userAgent = request.headers["user-agent"] as string;
 
-		socket.on("error", (err) => console.error("[Gateway]", err));
+    if (!ipAddress && Config.get().security.cdnSignatureIncludeIp) {
+        console.error("Gateway connection rejected: No IP address found.");
+        return socket.close(CLOSECODES.Decode_error, "Gateway connection rejected: IP address is required.");
+    }
 
-		// console.log(
-		// 	`[Gateway] New connection from ${socket.ipAddress}, total ${this.clients.size}`,
-		// );
+    if (!socket.userAgent && Config.get().security.cdnSignatureIncludeUserAgent) {
+        console.error("Gateway connection rejected: No User-Agent header found.");
+        return socket.close(CLOSECODES.Decode_error, "Gateway connection rejected: User-Agent header is required.");
+    }
 
-		if (process.env.WS_LOGEVENTS)
-			[
-				"close",
-				"error",
-				"upgrade",
-				//"message",
-				"open",
-				"ping",
-				"pong",
-				"unexpected-response",
-			].forEach((x) => {
-				socket.on(x, (y) => console.log(x, y));
-			});
+    if (request.headers.cookie?.split("; ").find((x) => x.startsWith("__sb_sessid="))) {
+        socket.fingerprint = request.headers.cookie
+            .split("; ")
+            .find((x) => x.startsWith("__sb_sessid="))
+            ?.split("=")[1];
+    }
 
-		const { searchParams } = new URL(`http://localhost${request.url}`);
-		// @ts-ignore
-		socket.encoding = searchParams.get("encoding") || "json";
-		if (!["json", "etf"].includes(socket.encoding))
-			return socket.close(CLOSECODES.Decode_error);
+    //Create session ID when the connection is opened. This allows gateway dump to group the initial websocket messages with the rest of the conversation.
+    const session_id = "TEMP_" + genSessionId();
+    socket.session_id = session_id; //Set the session of the WebSocket object
 
-		if (socket.encoding === "etf" && !erlpack)
-			throw new Error("Erlpack is not installed: 'npm i erlpack'");
+    try {
+        // @ts-ignore
+        socket.on("close", Close);
+        // @ts-ignore
+        socket.on("message", Message);
 
-		socket.version = Number(searchParams.get("version")) || 8;
-		if (socket.version != 8)
-			return socket.close(CLOSECODES.Invalid_API_version);
+        socket.on("error", (err) => console.error("[Gateway]", err));
 
-		// @ts-ignore
-		socket.compress = searchParams.get("compress") || "";
-		if (socket.compress) {
-			if (socket.compress !== "zlib-stream")
-				return socket.close(CLOSECODES.Decode_error);
-			socket.deflate = new Deflate();
-			socket.inflate = new Inflate();
-		}
+        console.log(`[Gateway] New connection from ${ipAddress}, total ${this.clients.size}`);
 
-		socket.events = {};
-		socket.member_events = {};
-		socket.permissions = {};
-		socket.sequence = 0;
+        if (process.env.WS_LOGEVENTS)
+            [
+                "close",
+                "error",
+                "upgrade",
+                //"message",
+                "open",
+                "ping",
+                "pong",
+                "unexpected-response",
+            ].forEach((x) => {
+                socket.on(x, (y) => console.log(x, y));
+            });
 
-		setHeartbeat(socket);
+        const { searchParams } = new URL(`http://localhost${request.url}`);
+        // @ts-ignore
+        socket.encoding = searchParams.get("encoding") || "json";
+        if (!["json", "etf"].includes(socket.encoding)) {
+            console.error(`[Gateway] Unknown encoding: ${socket.encoding}`);
+            return socket.close(CLOSECODES.Decode_error);
+        }
 
-		await Send(socket, {
-			op: OPCODES.Hello,
-			d: {
-				heartbeat_interval: 1000 * 30,
-			},
-		});
+        if (socket.encoding === "etf" && !erlpack) throw new Error("Erlpack is not installed: 'npm i @yukikaze-bot/erlpack'");
 
-		socket.readyTimeout = setTimeout(() => {
-			return socket.close(CLOSECODES.Session_timed_out);
-		}, 1000 * 30);
-	} catch (error) {
-		console.error(error);
-		return socket.close(CLOSECODES.Unknown_error);
-	}
+        socket.version = Number(searchParams.get("version")) || 8;
+        if (socket.version != 8) {
+            console.error(`[Gateway] Invalid API version: ${socket.version}`);
+            return socket.close(CLOSECODES.Invalid_API_version);
+        }
+
+        // @ts-ignore
+        socket.compress = searchParams.get("compress") || "";
+        if (socket.compress) {
+            if (socket.compress === "zlib-stream") {
+                socket.deflate = new Deflate();
+                socket.inflate = new Inflate();
+            } else if (socket.compress === "zstd-stream") {
+                socket.zstdEncoder = new Encoder(6);
+                socket.zstdDecoder = new Decoder();
+            } else {
+                console.error(`[Gateway] Unknown compression: ${socket.compress}`);
+                return socket.close(CLOSECODES.Decode_error);
+            }
+        }
+
+        socket.events = {};
+        socket.member_events = {};
+        socket.permissions = {};
+        socket.sequence = 0;
+
+        setHeartbeat(socket);
+
+        await Send(socket, {
+            op: OPCODES.Hello,
+            d: {
+                heartbeat_interval: 1000 * 30,
+            },
+        });
+
+        socket.readyTimeout = setTimeout(() => {
+            return socket.close(CLOSECODES.Session_timed_out);
+        }, 1000 * 30);
+    } catch (error) {
+        console.error(error);
+        return socket.close(CLOSECODES.Unknown_error);
+    }
 }

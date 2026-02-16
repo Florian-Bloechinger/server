@@ -16,175 +16,173 @@
 	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-import {
-	getDatabase,
-	getPermission,
-	GuildMembersChunkEvent,
-	Member,
-	Presence,
-	RequestGuildMembersSchema,
-	Session,
-} from "@spacebar/util";
+import { getDatabase, getPermission, GuildMembersChunkEvent, Member, Presence, Session } from "@spacebar/util";
 import { WebSocket, Payload, OPCODES, Send } from "@spacebar/gateway";
 import { check } from "./instanceOf";
-import { FindManyOptions, In, Like } from "typeorm";
+import { FindManyOptions, ILike, In } from "typeorm";
+import { RequestGuildMembersSchema } from "@spacebar/schemas";
 
 export async function onRequestGuildMembers(this: WebSocket, { d }: Payload) {
-	// Schema validation can only accept either string or array, so transforming it here to support both
-	if (!d.guild_id) throw new Error('"guild_id" is required');
-	d.guild_id = Array.isArray(d.guild_id) ? d.guild_id[0] : d.guild_id;
+    const startTime = Date.now();
+    // Schema validation can only accept either string or array, so transforming it here to support both
+    if (!d.guild_id) throw new Error('"guild_id" is required');
+    d.guild_id = Array.isArray(d.guild_id) ? d.guild_id[0] : d.guild_id;
 
-	if (d.user_ids && !Array.isArray(d.user_ids)) d.user_ids = [d.user_ids];
+    if (d.user_ids && !Array.isArray(d.user_ids)) d.user_ids = [d.user_ids];
 
-	check.call(this, RequestGuildMembersSchema, d);
+    check.call(this, RequestGuildMembersSchema, d);
 
-	const { query, presences, nonce } = d as RequestGuildMembersSchema;
-	let { limit, user_ids, guild_id } = d as RequestGuildMembersSchema;
+    const { presences, nonce, query: requestQuery } = d as RequestGuildMembersSchema;
+    let { limit, user_ids, guild_id } = d as RequestGuildMembersSchema;
 
-	guild_id = guild_id as string;
-	user_ids = user_ids as string[] | undefined;
+    // some discord libraries send empty string as query when they meant to send undefined, which was leading to errors being thrown in this handler
+    const query = requestQuery != "" ? requestQuery : undefined;
 
-	if ("query" in d && (!limit || Number.isNaN(limit)))
-		throw new Error('"query" requires "limit" to be set');
-	if ("query" in d && user_ids)
-		throw new Error('"query" and "user_ids" are mutually exclusive');
+    guild_id = guild_id as string;
+    user_ids = user_ids as string[] | undefined;
 
-	// TODO: Configurable limit?
-	if ((query || (user_ids && user_ids.length > 0)) && (!limit || limit > 100))
-		limit = 100;
+    if (d.query && (!limit || Number.isNaN(limit))) {
+        console.log("Query:", d);
+        throw new Error('"query" requires "limit" to be set');
+    }
 
-	const permissions = await getPermission(this.user_id, guild_id);
-	permissions.hasThrow("VIEW_CHANNEL");
+    if (d.query && user_ids) {
+        console.log("Query:", d);
+        throw new Error('"query" and "user_ids" are mutually exclusive');
+    }
 
-	const memberCount = await Member.count({
-		where: {
-			guild_id,
-		},
-	});
+    // TODO: Configurable limit?
+    if ((query || (user_ids && user_ids.length > 0)) && (!limit || limit > 100)) limit = 100;
 
-	const memberFind: FindManyOptions = {
-		where: {
-			guild_id,
-		},
-		relations: ["user", "roles"],
-	};
-	if (limit) memberFind.take = Math.abs(Number(limit || 100));
+    const permissions = await getPermission(this.user_id, guild_id);
+    permissions.hasThrow("VIEW_CHANNEL");
 
-	let members: Member[] = [];
+    const memberCount = await Member.count({
+        where: {
+            guild_id,
+        },
+    });
 
-	if (memberCount > 75000) {
-		// since we dont have voice channels yet, just return the connecting users member object
-		members = await Member.find({
-			...memberFind,
-			where: {
-				...memberFind.where,
-				user: {
-					id: this.user_id,
-				},
-			},
-		});
-	} else if (memberCount > this.large_threshold) {
-		// find all members who are online, have a role, have a nickname, or are in a voice channel, as well as respecting the query and user_ids
-		const db = getDatabase();
-		if (!db) throw new Error("Database not initialized");
-		const repo = db.getRepository(Member);
-		const q = repo
-			.createQueryBuilder("member")
-			.where("member.guild_id = :guild_id", { guild_id })
-			.leftJoinAndSelect("member.roles", "role")
-			.leftJoinAndSelect("member.user", "user")
-			.leftJoinAndSelect("user.sessions", "session")
-			.andWhere(
-				"',' || member.roles || ',' NOT LIKE :everyoneRoleIdList",
-				{ everyoneRoleIdList: "%," + guild_id + ",%" },
-			)
-			.andWhere("session.status != 'offline'")
-			.addOrderBy("user.username", "ASC")
-			.limit(memberFind.take);
+    const memberFind: FindManyOptions = {
+        where: {
+            guild_id,
+        },
+        relations: { user: true, roles: true },
+    };
+    if (limit) memberFind.take = Math.abs(Number(limit || 100));
 
-		if (query && query != "") {
-			q.andWhere(`user.username ILIKE :query`, {
-				query: `${query}%`,
-			});
-		} else if (user_ids) {
-			q.andWhere(`user.id IN (:...user_ids)`, { user_ids });
-		}
+    let members: Member[] = [];
 
-		members = await q.getMany();
-	} else {
-		if (query) {
-			// @ts-expect-error memberFind.where is very much defined
-			memberFind.where.user = {
-				username: Like(query + "%"),
-			};
-		} else if (user_ids && user_ids.length > 0) {
-			// @ts-expect-error memberFind.where is still very much defined
-			memberFind.where.id = In(user_ids);
-		}
+    if (memberCount > 75000) {
+        // since we dont have voice channels yet, just return the connecting users member object
+        members = await Member.find({
+            ...memberFind,
+            where: {
+                ...memberFind.where,
+                user: {
+                    id: this.user_id,
+                },
+            },
+        });
+    } else if (memberCount > this.large_threshold) {
+        // find all members who are online, have a role, have a nickname, or are in a voice channel, as well as respecting the query and user_ids
+        const db = getDatabase();
+        if (!db) throw new Error("Database not initialized");
+        const repo = db.getRepository(Member);
+        const q = repo
+            .createQueryBuilder("member")
+            .where("member.guild_id = :guild_id", { guild_id })
+            .leftJoinAndSelect("member.roles", "role")
+            .leftJoinAndSelect("member.user", "user")
+            .leftJoinAndSelect("user.sessions", "session")
+            .andWhere("',' || member.roles || ',' NOT LIKE :everyoneRoleIdList", { everyoneRoleIdList: "%," + guild_id + ",%" })
+            .addOrderBy("user.username", "ASC")
+            .limit(memberFind.take);
 
-		members = await Member.find(memberFind);
-	}
+        if (query && query != "") {
+            q.andWhere(`user.username ILIKE :query`, {
+                query: `${query}%`,
+            });
+        } else if (user_ids) {
+            q.andWhere(`user.id IN (:...user_ids)`, { user_ids });
+        }
 
-	const baseData = {
-		guild_id,
-		nonce,
-	};
+        members = await q.getMany();
+    } else {
+        if (query) {
+            // @ts-expect-error memberFind.where is very much defined
+            memberFind.where.user = {
+                username: ILike(query + "%"),
+            };
+        } else if (user_ids && user_ids.length > 0) {
+            // @ts-expect-error memberFind.where is still very much defined
+            memberFind.where.id = In(user_ids);
+        }
 
-	const chunkCount = Math.ceil(members.length / 1000);
+        members = await Member.find(memberFind);
+    }
 
-	let notFound: string[] = [];
-	if (user_ids && user_ids.length > 0)
-		notFound = user_ids.filter(
-			(id) => !members.some((member) => member.id == id),
-		);
+    const baseData = {
+        guild_id,
+        nonce,
+    };
 
-	const chunks: GuildMembersChunkEvent["data"][] = [];
-	while (members.length > 0) {
-		const chunk: Member[] = members.splice(0, 1000);
+    const chunkCount = Math.ceil(members.length / 1000);
 
-		const presenceList: Presence[] = [];
-		if (presences) {
-			for await (const member of chunk) {
-				const session = await Session.findOne({
-					where: { user_id: member.id },
-				});
-				if (session)
-					presenceList.push({
-						user: member.user.toPublicUser(),
-						status: session.status,
-						activities: session.activities,
-						client_status: session.client_status,
-					});
-			}
-		}
+    let notFound: string[] = [];
+    if (user_ids && user_ids.length > 0) notFound = user_ids.filter((id) => !members.some((member) => member.id == id));
 
-		chunks.push({
-			...baseData,
-			members: chunk.map((member) => member.toPublicMember()),
-			presences: presences ? presenceList : undefined,
-			chunk_index: chunks.length,
-			chunk_count: chunkCount,
-		});
-	}
+    const chunks: GuildMembersChunkEvent["data"][] = [];
+    while (members.length > 0) {
+        const chunk: Member[] = members.splice(0, 1000);
 
-	if (notFound.length > 0) {
-		if (chunks.length == 0)
-			chunks.push({
-				...baseData,
-				members: [],
-				presences: presences ? [] : undefined,
-				chunk_index: 0,
-				chunk_count: 1,
-			});
-		chunks[0].not_found = notFound;
-	}
+        const presenceList: Presence[] = [];
+        if (presences) {
+            for await (const member of chunk) {
+                const session = await Session.findOne({
+                    where: { user_id: member.id },
+                });
+                if (session)
+                    presenceList.push({
+                        user: member.user.toPublicUser(),
+                        status: session.status,
+                        activities: session.activities,
+                        client_status: session.client_status,
+                    });
+            }
+        }
 
-	chunks.forEach((chunk) => {
-		Send(this, {
-			op: OPCODES.Dispatch,
-			s: this.sequence++,
-			t: "GUILD_MEMBERS_CHUNK",
-			d: chunk,
-		});
-	});
+        chunks.push({
+            ...baseData,
+            members: chunk.map((member) => member.toPublicMember()),
+            presences: presences ? presenceList : undefined,
+            chunk_index: chunks.length,
+            chunk_count: chunkCount,
+        });
+    }
+
+    if (chunks.length == 0) {
+        chunks.push({
+            ...baseData,
+            members: [],
+            presences: presences ? [] : undefined,
+            chunk_index: 0,
+            chunk_count: 1,
+        });
+    }
+
+    if (notFound.length > 0) {
+        chunks[0].not_found = notFound;
+    }
+
+    chunks.forEach((chunk) => {
+        Send(this, {
+            op: OPCODES.Dispatch,
+            s: this.sequence++,
+            t: "GUILD_MEMBERS_CHUNK",
+            d: chunk,
+        });
+    });
+
+    console.log(`[Gateway] REQUEST_GUILD_MEMBERS took ${Date.now() - startTime}ms for guild ${guild_id} with ${members.length} members`);
 }

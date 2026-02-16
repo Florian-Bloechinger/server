@@ -15,68 +15,72 @@
 	You should have received a copy of the GNU Affero General Public License
 	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-
-import { closeDatabase, Config, initDatabase, initEvent } from "@spacebar/util";
 import dotenv from "dotenv";
+dotenv.config({ quiet: true });
+import { closeDatabase, Config, initDatabase, initEvent } from "@spacebar/util";
 import http from "http";
 import ws from "ws";
 import { Connection } from "./events/Connection";
-dotenv.config();
+import { loadWebRtcLibrary, mediaServer, WRTC_PORT_MAX, WRTC_PORT_MIN, WRTC_PUBLIC_IP } from "./util/MediaServer";
+import { green, yellow } from "picocolors";
 
 export class Server {
-	public ws: ws.Server;
-	public port: number;
-	public server: http.Server;
-	public production: boolean;
+    public ws: ws.Server;
+    public port: number;
+    public server: http.Server;
+    public production: boolean;
 
-	constructor({
-		port,
-		server,
-		production,
-	}: {
-		port: number;
-		server?: http.Server;
-		production?: boolean;
-	}) {
-		this.port = port;
-		this.production = production || false;
+    constructor({ port, server, production }: { port: number; server?: http.Server; production?: boolean }) {
+        this.port = port;
+        this.production = production || false;
 
-		if (server) this.server = server;
-		else {
-			this.server = http.createServer(function (req, res) {
-				res.writeHead(200).end("Online");
-			});
-		}
+        if (server) this.server = server;
+        else {
+            this.server = http.createServer(function (req, res) {
+                res.writeHead(200).end("Online");
+            });
+        }
 
-		// this.server.on("upgrade", (request, socket, head) => {
-		// 	if (!request.url?.includes("voice")) return;
-		// 	this.ws.handleUpgrade(request, socket, head, (socket) => {
-		// 		// @ts-ignore
-		// 		socket.server = this;
-		// 		this.ws.emit("connection", socket, request);
-		// 	});
-		// });
+        // this.server.on("upgrade", (request, socket, head) => {
+        // 	if (!request.url?.includes("voice")) return;
+        // 	this.ws.handleUpgrade(request, socket, head, (socket) => {
+        // 		// @ts-ignore
+        // 		socket.server = this;
+        // 		this.ws.emit("connection", socket, request);
+        // 	});
+        // });
 
-		this.ws = new ws.Server({
-			maxPayload: 1024 * 1024 * 100,
-			server: this.server,
-		});
-		this.ws.on("connection", Connection);
-		this.ws.on("error", console.error);
-	}
+        this.ws = new ws.Server({
+            maxPayload: 1024 * 1024 * 100,
+            server: this.server,
+        });
+        this.ws.on("connection", Connection);
+        this.ws.on("error", console.error);
+    }
 
-	async start(): Promise<void> {
-		await initDatabase();
-		await Config.init();
-		await initEvent();
-		if (!this.server.listening) {
-			this.server.listen(this.port);
-			console.log(`[WebRTC] online on 0.0.0.0:${this.port}`);
-		}
-	}
+    async start(): Promise<void> {
+        await initDatabase();
+        await Config.init();
+        await initEvent();
 
-	async stop() {
-		closeDatabase();
-		this.server.close();
-	}
+        // try to load webrtc library, if failed just don't start webrtc endpoint
+        try {
+            await loadWebRtcLibrary();
+        } catch (e) {
+            console.log(`[WebRTC] ${yellow("WEBRTC disabled")}`);
+            return;
+        }
+
+        await mediaServer.start(WRTC_PUBLIC_IP, WRTC_PORT_MIN, WRTC_PORT_MAX);
+        if (!this.server.listening) {
+            this.server.listen(this.port);
+            console.log(`[WebRTC] ${green(`online on 0.0.0.0:${this.port}`)}`);
+        }
+    }
+
+    async stop() {
+        await closeDatabase();
+        this.server.close();
+        mediaServer?.stop();
+    }
 }

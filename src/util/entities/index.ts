@@ -1,6 +1,6 @@
 /*
 	Spacebar: A FOSS re-implementation and extension of the Discord.com backend.
-	Copyright (C) 2023 Spacebar and Spacebar Contributors
+	Copyright (C) 2024 Spacebar and Spacebar Contributors
 	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as published
@@ -17,8 +17,10 @@
 */
 
 export * from "./Application";
+export * from "./ApplicationCommand";
 export * from "./Attachment";
 export * from "./AuditLog";
+export * from "./AutomodRule";
 export * from "./BackupCodes";
 export * from "./Badge";
 export * from "./Ban";
@@ -26,6 +28,7 @@ export * from "./BaseClass";
 export * from "./Categories";
 export * from "./Channel";
 export * from "./ClientRelease";
+export * from "./CloudAttachment";
 export * from "./Config";
 export * from "./ConnectedAccount";
 export * from "./ConnectionConfigEntity";
@@ -33,6 +36,7 @@ export * from "./EmbedCache";
 export * from "./Emoji";
 export * from "./Encryption";
 export * from "./Guild";
+export * from "./InstanceBan";
 export * from "./Invite";
 export * from "./Member";
 export * from "./Message";
@@ -47,11 +51,16 @@ export * from "./SecurityKey";
 export * from "./Session";
 export * from "./Sticker";
 export * from "./StickerPack";
+export * from "./Stream";
+export * from "./StreamSession";
 export * from "./Team";
 export * from "./TeamMember";
 export * from "./Template";
+export * from "./ThreadMember";
 export * from "./User";
 export * from "./UserSettings";
+export * from "./UserSettingsProtos";
 export * from "./ValidRegistrationTokens";
 export * from "./VoiceState";
 export * from "./Webhook";
+export * from "./Tag";

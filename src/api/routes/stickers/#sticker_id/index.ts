@@ -19,22 +19,22 @@
 import { route } from "@spacebar/api";
 import { Sticker } from "@spacebar/util";
 import { Request, Response, Router } from "express";
-const router = Router();
+const router = Router({ mergeParams: true });
 
 router.get(
-	"/",
-	route({
-		responses: {
-			200: {
-				body: "Sticker",
-			},
-		},
-	}),
-	async (req: Request, res: Response) => {
-		const { sticker_id } = req.params;
+    "/",
+    route({
+        responses: {
+            200: {
+                body: "Sticker",
+            },
+        },
+    }),
+    async (req: Request, res: Response) => {
+        const { sticker_id } = req.params as { [key: string]: string };
 
-		res.json(await Sticker.find({ where: { id: sticker_id } }));
-	},
+        res.json(await Sticker.find({ where: { id: sticker_id } }));
+    },
 );
 
 export default router;

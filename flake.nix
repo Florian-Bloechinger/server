@@ -2,79 +2,119 @@
   description = "Spacebar server, written in Typescript.";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachSystem flake-utils.lib.allSystems (system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-        };
-        hashesFile = builtins.fromJSON (builtins.readFile ./hashes.json);
-        lib = pkgs.lib;
-      in rec {
-        packages.default = pkgs.buildNpmPackage {
-          pname = "spacebar-server-ts";
-          name = "spacebar-server-ts";
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    nixpkgs.lib.recursiveUpdate
+      (
+        let
+          rVersion =
+            let
+              rev = self.sourceInfo.shortRev or self.sourceInfo.dirtyShortRev;
+              date = builtins.substring 0 8 self.sourceInfo.lastModifiedDate;
+              time = builtins.substring 8 6 self.sourceInfo.lastModifiedDate;
+            in
+            "preview.${date}-${time}"; # +${rev}";
+        in
+        flake-utils.lib.eachSystem flake-utils.lib.allSystems (
+          system:
+          let
+            pkgs = import nixpkgs {
+              inherit system;
+            };
+            lib = pkgs.lib;
+          in
+          {
+            packages = {
+              default = (pkgs.callPackage (import ./default.nix { inherit self rVersion; })) { };
+            };
 
-          meta = with lib; {
-            description = "Spacebar server, a FOSS reimplementation of the Discord backend.";
-            homepage = "https://github.com/spacebarchat/server";
-            license = licenses.agpl3Plus;
-            platforms = platforms.all;
-            mainProgram = "start-bundle";
-          };
+            containers = {
+              docker = {
+                default = pkgs.dockerTools.buildLayeredImage {
+                  name = "spacebar-server-ts";
+                  tag = builtins.replaceStrings [ "+" ] [ "_" ] self.packages.${system}.default.version;
+                  contents = [
+                    self.packages.${system}.default
+                    pkgs.dockerTools.binSh
+                    pkgs.dockerTools.usrBinEnv
+                    pkgs.dockerTools.caCertificates
+                  ];
+                  config = {
+                    Cmd = [ "${self.outputs.packages.${system}.default}/bin/start-bundle" ];
+                    WorkingDir = "/data";
+                    Env = [
+                      "PORT=3001"
+                    ];
+                    Expose = [ "3001" ];
+                  };
+                };
+              }
+              // lib.genAttrs [ "api" "cdn" "gateway" ] (
+                mod:
+                pkgs.dockerTools.buildLayeredImage {
+                  name = "spacebar-server-ts-${mod}";
+                  tag = builtins.replaceStrings [ "+" ] [ "_" ] self.packages.${system}.default.version;
+                  contents = [
+                    self.packages.${system}.default
+                    pkgs.dockerTools.binSh
+                    pkgs.dockerTools.usrBinEnv
+                    pkgs.dockerTools.caCertificates
+                  ];
+                  config = {
+                    Cmd = [ "${self.outputs.packages.${system}.default}/bin/start-${mod}" ];
+                    WorkingDir = "/data";
+                    Env = [
+                      "PORT=3001"
+                    ];
+                    Expose = [ "3001" ];
+                  };
+                }
+              );
+            };
 
-          src = ./.;
-          nativeBuildInputs = with pkgs; [ python3 ];
-          npmDepsHash = hashesFile.npmDepsHash;
-          makeCacheWritable = true;
-          postPatch = ''
-            substituteInPlace package.json --replace 'npx patch-package' '${pkgs.nodePackages.patch-package}/bin/patch-package'
-          '';
-          installPhase = ''
-            runHook preInstall
-            set -x
-            #remove packages not needed for production, or at least try to...
-            npm prune --omit dev --no-save $npmInstallFlags "''${npmInstallFlagsArray[@]}" $npmFlags "''${npmFlagsArray[@]}"
-            find node_modules -maxdepth 1 -type d -empty -delete
-
-            mkdir -p $out/node_modules/
-            cp -r node_modules/* $out/node_modules/
-            cp -r dist/ $out/node_modules/@spacebar
-            for i in dist/**/start.js
-            do
-              makeWrapper ${pkgs.nodejs-slim}/bin/node $out/bin/start-`dirname ''${i/dist\//}` --prefix NODE_PATH : $out/node_modules --add-flags $out/node_modules/@spacebar`dirname ''${i/dist/}`/start.js
-            done
-            set +x
-            substituteInPlace package.json --replace 'dist/' 'node_modules/@spacebar/'
-            find $out/node_modules/@spacebar/ -type f -name "*.js" | while read srcFile; do
-              echo Patching imports in ''${srcFile/$out\/node_modules\/@spacebar//}...
-              substituteInPlace $srcFile --replace 'require("./' 'require(__dirname + "/'
-              substituteInPlace $srcFile --replace 'require("../' 'require(__dirname + "/../'
-              substituteInPlace $srcFile --replace ', "assets"' ', "..", "assets"'
-              #substituteInPlace $srcFile --replace 'require("@spacebar/' 'require("
-            done
-            set -x
-            cp -r assets/ $out/
-            cp package.json $out/
-            rm -v $out/assets/openapi.json
-            #rm -v $out/assets/schemas.json
-
-            #debug utils:
-            #cp $out/node_modules/@spacebar/ $out/build_output -r
-            set +x
-            runHook postInstall
-          '';
-        };
-        devShell = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            nodejs
-            nodePackages.typescript
-          ];
-        };
-      }
-    );
+            devShells.default = pkgs.mkShell {
+              buildInputs = with pkgs; [
+                nodejs_24
+                nodePackages.typescript
+                nodePackages.patch-package
+                nodePackages.prettier
+                (pkgs.python3.withPackages (ps: with ps; [ setuptools ]))
+              ];
+            };
+          }
+        )
+        // {
+          nixosModules.default = import ./nix/modules/default self;
+          testVm = import ./nix/testVm/default.nix { inherit self nixpkgs; };
+          checks =
+            let
+              pkgs = import nixpkgs { system = "x86_64-linux"; };
+              lib = pkgs.lib;
+            in
+            lib.recursiveUpdate (lib.attrsets.unionOfDisjoint { } self.packages) {
+              x86_64-linux = {
+                spacebar-server-tests = self.packages.x86_64-linux.default.passthru.tests;
+              }
+              // (lib.listToAttrs (
+                lib.mapAttrsToList (name: container: {
+                  name = "docker-${name}";
+                  value = container;
+                }) self.containers.x86_64-linux.docker
+              ));
+            };
+        }
+      )
+      (
+        import ./extra/admin-api/outputs.nix {
+          inherit self nixpkgs flake-utils;
+        }
+      );
 }
